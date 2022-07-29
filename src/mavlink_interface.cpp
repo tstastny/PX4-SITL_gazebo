@@ -348,6 +348,20 @@ void MavlinkInterface::UpdateIMU(const SensorData::Imu &data, int id) {
   RegisterNewHILSensorInstance(id);
 }
 
+void MavlinkInterface::UpdateIMU2(const SensorData::Imu &data, int id) {
+  const std::lock_guard<std::mutex> lock(sensor_msg_mutex_);
+  for (auto& instance : hil_data_) {
+    if (instance.id == id) {
+      instance.accel_b = data.accel_b;
+      instance.gyro_b = data.gyro_b;
+      instance.imu_updated = true;
+      return;
+    }
+  }
+  //Register new HIL instance if we have never seen the id
+  RegisterNewHILSensorInstance(id);
+}
+
 void MavlinkInterface::UpdateMag(const SensorData::Magnetometer &data, int id) {
   const std::lock_guard<std::mutex> lock(sensor_msg_mutex_);
   for (auto& instance : hil_data_) {

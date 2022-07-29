@@ -159,6 +159,7 @@ public:
     void UpdateBarometer(const SensorData::Barometer &data, const int id = 0);
     void UpdateAirspeed(const SensorData::Airspeed &data, const int id = 0);
     void UpdateIMU(const SensorData::Imu &data, const int id = 0);
+    void UpdateIMU2(const SensorData::Imu &data, const int id = 0);
     void UpdateMag(const SensorData::Magnetometer &data, const int id = 0);
     Eigen::VectorXd GetActuatorControls();
     bool GetArmedState();

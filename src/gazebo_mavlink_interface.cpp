@@ -206,6 +206,7 @@ void GazeboMavlinkInterface::Load(physics::ModelPtr _model, sdf::ElementPtr _sdf
   getSdfParam<std::string>(_sdf, "motorSpeedCommandPubTopic", motor_velocity_reference_pub_topic_,
       motor_velocity_reference_pub_topic_);
   getSdfParam<std::string>(_sdf, "imuSubTopic", imu_sub_topic_, imu_sub_topic_);
+  getSdfParam<std::string>(_sdf, "imu2SubTopic", imu2_sub_topic_, imu2_sub_topic_);
   getSdfParam<std::string>(_sdf, "visionSubTopic", vision_sub_topic_, vision_sub_topic_);
   getSdfParam<std::string>(_sdf, "opticalFlowSubTopic",
       opticalFlow_sub_topic_, opticalFlow_sub_topic_);
@@ -419,6 +420,7 @@ void GazeboMavlinkInterface::Load(physics::ModelPtr _model, sdf::ElementPtr _sdf
 
   // Subscribe to messages of other plugins.
   imu_sub_ = node_handle_->Subscribe("~/" + model_->GetName() + imu_sub_topic_, &GazeboMavlinkInterface::ImuCallback, this);
+  imu2_sub_ = node_handle_->Subscribe("~/" + model_->GetName() + imu2_sub_topic_, &GazeboMavlinkInterface::Imu2Callback, this);
   opticalFlow_sub_ = node_handle_->Subscribe("~/" + model_->GetName() + opticalFlow_sub_topic_, &GazeboMavlinkInterface::OpticalFlowCallback, this);
   irlock_sub_ = node_handle_->Subscribe("~/" + model_->GetName() + irlock_sub_topic_, &GazeboMavlinkInterface::IRLockCallback, this);
   groundtruth_sub_ = node_handle_->Subscribe("~/" + model_->GetName() + groundtruth_sub_topic_, &GazeboMavlinkInterface::GroundtruthCallback, this);
@@ -456,6 +458,7 @@ void GazeboMavlinkInterface::Load(physics::ModelPtr _model, sdf::ElementPtr _sdf
 #else
   last_time_ = world_->GetSimTime();
   last_imu_time_ = world_->GetSimTime();
+  last_imu2_time_ = world_->GetSimTime();
 #endif
 
   // This doesn't seem to be used anywhere but we leave it here
@@ -569,6 +572,21 @@ void GazeboMavlinkInterface::OnUpdate(const common::UpdateInfo&  /*_info*/) {
     return;
   }
 
+  std::unique_lock<std::mutex> lock(last_imu2_message_mutex_);
+
+  if (previous_imu2_seq_ > 0) {
+    while (previous_imu2_seq_ == last_imu2_message_.seq() && IsRunning()) {
+      last_imu2_message_cond_.wait_for(lock, std::chrono::milliseconds(10));
+    }
+  }
+
+  previous_imu2_seq_ = last_imu2_message_.seq();
+
+  // Always run at 250 Hz. At 500 Hz, the skip factor should be 2, at 1000 Hz 4.
+  if (!(previous_imu2_seq_ % update_skip_factor_ == 0)) {
+    return;
+  }
+
 #if GAZEBO_MAJOR_VERSION >= 9
   common::Time current_time = world_->SimTime();
 #else
@@ -666,6 +684,36 @@ void GazeboMavlinkInterface::ImuCallback(ImuPtr& imu_message)
   last_imu_message_cond_.notify_one();
 }
 
+void GazeboMavlinkInterface::Imu2Callback(ImuPtr& imu_message)
+{
+  std::unique_lock<std::mutex> lock(last_imu_message_mutex_);
+
+  const int64_t diff = imu_message->seq() - last_imu2_message_.seq();
+  if (diff != 1 && imu_message->seq() != 0)
+  {
+    gzerr << "Skipped " << (diff - 1) << " IMU2 samples (presumably CPU usage is too high)\n";
+  }
+
+  last_imu2_message_ = *imu_message;
+  lock.unlock();
+  last_imu2_message_cond_.notify_one();
+}
+
+void GazeboMavlinkInterface::Imu2Callback(ImuPtr& imu_message)
+{
+  std::unique_lock<std::mutex> lock(last_imu2_message_mutex_);
+
+  const int64_t diff = imu_message->seq() - last_imu2_message_.seq();
+  if (diff != 1 && imu_message->seq() != 0)
+  {
+    gzerr << "Skipped " << (diff - 1) << " IMU samples (presumably CPU usage is too high)\n";
+  }
+
+  last_imu2_message_ = *imu_message;
+  lock.unlock();
+  last_imu2_message_cond_.notify_one();
+}
+
 void GazeboMavlinkInterface::SendSensorMessages()
 {
   ignition::math::Quaterniond q_gr = ignition::math::Quaterniond(
@@ -673,6 +721,12 @@ void GazeboMavlinkInterface::SendSensorMessages()
     last_imu_message_.orientation().x(),
     last_imu_message_.orientation().y(),
     last_imu_message_.orientation().z());
+
+  ignition::math::Quaterniond q_gr_2 = ignition::math::Quaterniond(
+    last_imu2_message_.orientation().w(),
+    last_imu2_message_.orientation().x(),
+    last_imu2_message_.orientation().y(),
+    last_imu2_message_.orientation().z());
 
   bool should_send_imu = false;
   if (!enable_lockstep_) {
@@ -708,10 +762,25 @@ void GazeboMavlinkInterface::SendSensorMessages()
     last_imu_message_.angular_velocity().y(),
     last_imu_message_.angular_velocity().z()));
 
+  ignition::math::Vector3d accel2_b = q2_FLU_to_FRD.RotateVector(ignition::math::Vector3d(
+    last_imu2_message_.linear_acceleration().x(),
+    last_imu2_message_.linear_acceleration().y(),
+    last_imu2_message_.linear_acceleration().z()));
+
+  ignition::math::Vector3d gyro2_b = q2_FLU_to_FRD.RotateVector(ignition::math::Vector3d(
+    last_imu2_message_.angular_velocity().x(),
+    last_imu2_message_.angular_velocity().y(),
+    last_imu2_message_.angular_velocity().z()));
+
   SensorData::Imu imu_data;
   imu_data.accel_b = Eigen::Vector3d(accel_b.X(), accel_b.Y(), accel_b.Z());
   imu_data.gyro_b = Eigen::Vector3d(gyro_b.X(), gyro_b.Y(), gyro_b.Z());
   mavlink_interface_->UpdateIMU(imu_data);
+
+  SensorData::Imu imu2_data;
+  imu2_data.accel_b = Eigen::Vector3d(accel2_b.X(), accel2_b.Y(), accel2_b.Z());
+  imu2_data.gyro_b = Eigen::Vector3d(gyro2_b.X(), gyro2_b.Y(), gyro2_b.Z());
+  mavlink_interface_->UpdateIMU2(imu2_data);
 
   mavlink_interface_->SendSensorMessages(time_usec);
 }
@@ -725,17 +794,28 @@ void GazeboMavlinkInterface::SendGroundTruth()
     last_imu_message_.orientation().y(),
     last_imu_message_.orientation().z());
 
+  ignition::math::Quaterniond q2_gr = ignition::math::Quaterniond(
+    last_imu2_message_.orientation().w(),
+    last_imu2_message_.orientation().x(),
+    last_imu2_message_.orientation().y(),
+    last_imu2_message_.orientation().z());
+
   ignition::math::Quaterniond q_FLU_to_NED = q_ENU_to_NED * q_gr;
   ignition::math::Quaterniond q_nb = q_FLU_to_NED * q_FLU_to_FRD.Inverse();
+
+  ignition::math::Quaterniond q2_FLU_to_NED = q_ENU_to_NED * q2_gr;
+  ignition::math::Quaterniond q2_nb = q2_FLU_to_NED * q_FLU_to_FRD.Inverse();
 
 #if GAZEBO_MAJOR_VERSION >= 9
   ignition::math::Vector3d vel_b = q_FLU_to_FRD.RotateVector(model_->RelativeLinearVel());
   ignition::math::Vector3d vel_n = q_ENU_to_NED.RotateVector(model_->WorldLinearVel());
   ignition::math::Vector3d omega_nb_b = q_FLU_to_FRD.RotateVector(model_->RelativeAngularVel());
+  ignition::math::Vector3d omega2_nb_b = q_FLU_to_FRD.RotateVector(model2_->RelativeAngularVel()); // XXX: where can we get the right link???
 #else
   ignition::math::Vector3d vel_b = q_FLU_to_FRD.RotateVector(ignitionFromGazeboMath(model_->GetRelativeLinearVel()));
   ignition::math::Vector3d vel_n = q_ENU_to_NED.RotateVector(ignitionFromGazeboMath(model_->GetWorldLinearVel()));
   ignition::math::Vector3d omega_nb_b = q_FLU_to_FRD.RotateVector(ignitionFromGazeboMath(model_->GetRelativeAngularVel()));
+  ignition::math::Vector3d omega2_nb_b = q_FLU_to_FRD.RotateVector(ignitionFromGazeboMath(model2_->GetRelativeAngularVel())); // XXX: where can we get the right link???
 #endif
 
 #if GAZEBO_MAJOR_VERSION >= 9
@@ -781,10 +861,34 @@ void GazeboMavlinkInterface::SendGroundTruth()
   hil_state_quat.yacc = accel_true_ned.Y() * 1000;
   hil_state_quat.zacc = accel_true_ned.Z() * 1000;
 
+  // HACKY HACK HACK / / / / / / / /
+
+  // send ground truth (for the other link)
+  mavlink_hil_state_quaternion_t hil_state_quat2;
+#if GAZEBO_MAJOR_VERSION >= 9
+  hil_state_quat2.time_usec = std::round(world_->SimTime().Double() * 1e6);
+#else
+  hil_state_quat2.time_usec = std::round(world_->GetSimTime().Double() * 1e6);
+#endif
+  hil_state_quat2.attitude_quaternion[0] = q2_nb.W();
+  hil_state_quat2.attitude_quaternion[1] = q2_nb.X();
+  hil_state_quat2.attitude_quaternion[2] = q2_nb.Y();
+  hil_state_quat2.attitude_quaternion[3] = q2_nb.Z();
+
+  hil_state_quat2.rollspeed = omega2_nb_b.X();
+  hil_state_quat2.pitchspeed = omega2_nb_b.Y();
+  hil_state_quat2.yawspeed = omega2_nb_b.Z();
+
+  // END HACKY HACK HACK / / / / / / / /
+
   if (!hil_mode_ || (hil_mode_ && hil_state_level_)) {
     mavlink_message_t msg;
     mavlink_msg_hil_state_quaternion_encode_chan(1, 200, MAVLINK_COMM_0, &msg, &hil_state_quat);
     mavlink_interface_->send_mavlink_message(&msg);
+
+    mavlink_message_t msg2;
+    mavlink_msg_hil_state_quaternion_encode_chan(1, 66, MAVLINK_COMM_0, &msg2, &hil_state_quat2);
+    mavlink_interface_->send_mavlink_message(&msg2);
   }
 }
 

@@ -172,6 +172,7 @@ private:
   event::ConnectionPtr sigIntConnection_;
 
   void ImuCallback(ImuPtr& imu_msg);
+  void Imu2Callback(ImuPtr& imu_msg);
   void GpsCallback(GpsPtr& gps_msg, const int& id);
   void GroundtruthCallback(GtPtr& groundtruth_msg);
   void LidarCallback(LidarPtr& lidar_msg, const int& id);
@@ -235,6 +236,7 @@ private:
   Sensor_M sensor_map_{}; // Map of sensor SubscriberPtr, IDs and orientations
 
   std::string imu_sub_topic_{kDefaultImuTopic};
+  std::string imu2_sub_topic_{kDefaultImuTopic};
   std::string opticalFlow_sub_topic_{kDefaultOpticalFlowTopic};
   std::string irlock_sub_topic_{kDefaultIRLockTopic};
   std::string groundtruth_sub_topic_{kDefaultGroundtruthTopic};
@@ -244,10 +246,14 @@ private:
   std::string wind_sub_topic_{kDefaultWindTopic};
 
   std::mutex last_imu_message_mutex_ {};
+  std::mutex last_imu2_message_mutex_ {};
   std::condition_variable last_imu_message_cond_ {};
+  std::condition_variable last_imu2_message_cond_ {};
   sensor_msgs::msgs::Imu last_imu_message_;
+  sensor_msgs::msgs::Imu last_imu2_message_;
   common::Time last_time_;
   common::Time last_imu_time_;
+  common::Time last_imu2_time_;
   common::Time last_actuator_time_;
   common::Time last_heartbeat_sent_time_{};
 
